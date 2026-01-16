@@ -85,6 +85,9 @@ def load_model_config(config_path: Optional[str] = None) -> Any:
             else:
                 config[dest_key] = env_val
 
+    print("*"*40)
+    print(base_configs)
+    print("*"*40)
     return base_configs
 
 
@@ -190,10 +193,10 @@ def load_json(text) -> Any:
 def append_to_json_file(filepath: str, data: list[dict]):
     existing_data = []
     if os.path.exists(filepath):
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             existing_data = json.load(f)
     existing_data.extend(data)
-    with open(filepath, "w") as outfile:
+    with open(filepath, "w", encoding="utf-8") as outfile:
         json.dump(
             existing_data,
             outfile,
@@ -204,7 +207,7 @@ def append_to_json_file(filepath: str, data: list[dict]):
 
 
 def append_to_jsonl_file(filepath: str, data: list[dict]):
-    with open(filepath, "a") as outfile:
+    with open(filepath, "a", encoding="utf-8") as outfile:
         for entry in data:
             json.dump(
                 entry,
@@ -216,7 +219,7 @@ def append_to_jsonl_file(filepath: str, data: list[dict]):
 
 
 def save_json_file(filepath: str, data: list[dict]):
-    with open(filepath, "w") as outfile:
+    with open(filepath, "w", encoding="utf-8") as outfile:
         json.dump(
             data,
             outfile,
@@ -227,7 +230,7 @@ def save_json_file(filepath: str, data: list[dict]):
 
 
 def save_jsonl_file(filepath: str, data: list[dict]):
-    with open(filepath, "w") as outfile:
+    with open(filepath, "w", encoding="utf-8") as outfile:
         for entry in data:
             json.dump(
                 entry,
@@ -337,9 +340,6 @@ def convert_messages_from_chat_format_to_langchain(
             langchain_messages.append(HumanMessagePromptTemplate.from_template(content))
         elif role == "assistant":
             langchain_messages.append(AIMessagePromptTemplate.from_template(content))
-            if message.get("tool_call"):
-                logger.error("tool_call not implemented yet.")
-                raise NotImplementedError("tool_call not implemented yet.")
         elif role == "system":
             langchain_messages.append(SystemMessagePromptTemplate.from_template(content))
         elif role == "tool":
@@ -418,7 +418,17 @@ def get_models_used(task: str):
     used_model_config = {}
     for model in models_used:
         used_model_config[model] = all_model_config.get(model)
-
+    
+    print("="*40)
+    print("PRINTING USER MODEL CONFIG: ")
+    print("="*40)
+    # print(used_model_config['gpt-5']['url'])
+    print('\n')
+    # print(used_model_config['gpt-5']['auth_token'])
+    print('\n')
+    print(used_model_config)
+    print('-'*40)
+    print('\n')
     return used_model_config
 
 

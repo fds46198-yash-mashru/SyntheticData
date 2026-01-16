@@ -1,0 +1,205 @@
+data_config:
+  sink:
+    type: "csv"
+    file_path: "tasks/examples/table_synthesis/output/synth_fin_llm_as_judge_feedback_loop_v2.csv"
+    encoding: "utf-8"
+
+graph_config:
+  nodes:
+    load_schema:
+      node_type: lambda
+      lambda: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.LoadSchema
+      file_path: "c:/Users/fds46198/OneDrive - FactSet/Desktop/SyGra Synthetic/tabledemo.csv"
+
+    prepare_generation_input:
+      node_type: lambda
+      lambda: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.PrepareGenerationInput
+
+    prepare_iterative_feedback:
+      node_type: lambda
+      lambda: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.PrepareIterativeFeedback
+
+    synthesize_row:
+      node_type: llm
+      output_keys: synthetic_table_csv
+      post_process: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.SyntheticTablePostProcessor
+      prompt:
+        - system: |
+            You are a financial expert generating synthetic versions of financial statement tables.
+
+            You receive the full CSV of a 10-K/10-Q style table as input and must output a modified CSV.
+            Treat each call independently: you generate exactly ONE synthetic table for the given input CSV.
+
+            Apply ALL of the following rules simultaneously:
+
+            ROWS (about 30% change through additions/deletions):
+            - Compared with the original table, approximately 30% of the row positions must change.
+            - You may DELETE some existing data rows.
+            - You may INSERT new data rows with realistic new metrics that did not exist before.
+            - The overall number of rows in the synthetic table should differ from the original by roughly 30% (a small deviation is acceptable if needed to keep the table coherent).
+            - Header rows, section labels, and subtotal/total rows may be kept, adjusted, or recomputed as needed to stay logically consistent.
+
+            COLUMNS (about 30% new columns, only additions, no deletions):
+            - Keep all existing columns and their headers; DO NOT delete any original columns.
+            - Add new non-empty data columns on the RIGHT side of the table so that the total number of columns increases by roughly 30% (a small deviation is acceptable).
+            - Each new column must have a clear, realistic header (for example a new fiscal year, a new scenario, or a new segment).
+            - Fill every cell in each new column with realistic numeric values that are coherent with the rest of the row.
+
+            VALUES AND NUMERICAL COHERENCE:
+            - Ensure that totals, subtotals, ratios, and percentage rows remain arithmetically and financially coherent after you add/delete rows and add columns.
+            - If you delete a row that previously contributed to a total or subtotal, you MUST adjust the corresponding total/subtotal rows so that they reflect the new components.
+            - If you split or merge rows, or add new rows that are part of a total, make sure the totals still equal the sum of their component rows within a reasonable rounding tolerance.
+            - When you change numeric values (due to added/deleted rows or added columns), keep the magnitudes, signs, and relationships realistic for financial statements.
+
+            GENERAL RULES:
+            - The synthetic table MUST NOT be identical to the input table.
+            - Preserve valid CSV formatting (commas, quotes, header row(s)).
+            - Do not add any explanations, comments, or JSON; return ONLY the CSV text of the new synthetic table.
+        - user: |
+            Attempt: {attempt} of {max_attempts}
+
+            Original CSV table:
+
+            {generation_input_csv}
+
+            Produce exactly one synthetic version of this table according to the rules above.
+            - Approximately 30% of the row positions must be changed through row additions and/or deletions.
+            - The total number of columns should increase by roughly 30% via ADDING new columns on the right; do not delete existing columns.
+            - Ensure that all totals, subtotals, and other derived values remain coherent after your modifications.
+            - Return only CSV text; do not repeat the instructions.
+      model:
+        name: sonnet-4-5
+        parameters:
+          temperature: 0.9
+
+    refine_synthetic_table:
+      node_type: llm
+      output_keys: refined_table_csv
+      post_process: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.SyntheticTablePostProcessor
+      prompt:
+        - system: |
+            You are refining a synthetic financial CSV table to satisfy strict constraints.
+
+            Priorities:
+            - Make the CSV valid and internally consistent.
+            - Reduce hallucinations: do not invent facts that contradict totals/subtotals; recompute totals if needed.
+            - Keep the table realistic and coherent.
+            - Follow the judge feedback exactly.
+
+            Return ONLY CSV text. No markdown, no explanations.
+        - user: |
+            Attempt: {attempt} of {max_attempts}
+            Target confidence for this attempt: {judge_target_confidence_pct}%
+
+            Original CSV:
+            {original_csv}
+
+            Current candidate CSV:
+            {synthetic_table_csv}
+
+            Judge feedback to apply (cumulative across all prior attempts; do not regress):
+            {judge_feedback_cumulative}
+
+            Produce ONE corrected CSV that addresses the feedback and satisfies the constraints.
+      model:
+        name: sonnet-4-5
+        parameters:
+          temperature: 0.2
+
+    judge_synthetic_table:
+      node_type: llm
+      output_keys: judge_raw
+      post_process: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.JudgeTablePostProcessor
+      prompt:
+        - system: |
+            You are a strict auditor for synthetic financial CSV tables.
+
+            Your ONLY job:
+            1) Check whether the candidate synthetic table follows the required constraints:
+               - ~30% rows changed via additions/deletions (relative to the original)
+               - ~30% new columns added on the right (original columns must remain; no deletions)
+               - CSV is valid and not identical to the original
+            2) If ANY constraint is not satisfied, you MUST generate a corrected CSV that DOES satisfy them.
+
+            Output MUST be ONLY valid JSON. No extra text.
+        - user: |
+            Attempt: {attempt} of {max_attempts}
+            Minimum confidence required for this attempt: {judge_target_confidence_pct}%
+
+            Evaluate whether the candidate synthetic CSV satisfies these constraints relative to the original CSV:
+
+            REQUIRED CONSTRAINTS:
+            - About 30% row positions must change via row additions and/or deletions (relative to original).
+            - About 30% new columns must be added on the RIGHT side. Do NOT delete original columns.
+            - Output must be valid CSV text only (no markdown), and must NOT be identical to the original.
+            - Keep totals/subtotals coherent and realistic.
+
+            If constraints are satisfied, set pass=true and corrected_csv="".
+            If constraints are NOT satisfied, set pass=false and provide corrected_csv containing ONE corrected CSV table that satisfies ALL constraints.
+
+            Return JSON with this exact schema (keys must exist; do not add extra keys):
+            {{
+              "pass": true_or_false,
+              "overall_score": number_1_to_5,
+              "confidence": number_0_to_1_or_0_to_100,
+              "summary": "short summary",
+              "issues": [
+                {{"category": "rows|columns|csv_validity|difference|coherence", "severity": "low|medium|high", "description": "...", "evidence": "..."}}
+              ],
+              "regeneration_instructions": "If failed, describe what was wrong in one consolidated instruction.",
+              "corrected_csv": "If failed, put the corrected CSV table here; else empty string."
+            }}
+
+            Constraints:
+            - corrected_csv must be ONLY CSV (no markdown fences).
+
+            Original CSV:
+            {original_csv}
+
+            Candidate synthetic CSV:
+            {synthetic_table_csv}
+      model:
+        name: sonnet-4-5
+        parameters:
+          temperature: 0
+          max_tokens: 4096
+
+    write_output:
+      node_type: lambda
+      lambda: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.WriteAttemptOutput
+      output_subdir: "output_feedback_loop_v2"
+
+    write_reasoning:
+      node_type: lambda
+      lambda: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.WriteAttemptReasoning
+      output_subdir: "output_feedback_loop_v2"
+
+    increment_attempt:
+      node_type: lambda
+      lambda: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.IncrementAttempt
+
+  edges:
+    - from: START
+      to: load_schema
+    - from: load_schema
+      to: prepare_generation_input
+    - from: prepare_generation_input
+      to: prepare_iterative_feedback
+    - from: prepare_iterative_feedback
+      to: synthesize_row
+    - from: synthesize_row
+      to: judge_synthetic_table
+    - from: judge_synthetic_table
+      to: write_output
+    - from: write_output
+      to: write_reasoning
+    - from: write_reasoning
+      condition: tasks.examples.table_synthesis.task_executor_llm_as_judge_feedback_loop_v2.ShouldContinueFeedbackLoopCondition
+      path_map:
+        END: END
+        increment_attempt: increment_attempt
+    - from: increment_attempt
+      to: prepare_generation_input
+
+output_config:
+  dummy: true

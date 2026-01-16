@@ -37,6 +37,9 @@ def check_model_availability(task_name):
         model_param = ModelParams(url=mc.get("url"), auth_token=mc.get("auth_token"))
         # inference
         status = mod.ping()
+        print("*"*40)
+        print(status)
+        print("*"*40)
         if status != 200:
             logger.error(f"Model({mn}) is down. Aborting the process.")
             sys.exit(1)
@@ -109,10 +112,55 @@ if __name__ == "__main__":
         help="Name of the run to be used in output file name and logs",
     )
     parser.add_argument(
+        "--judge_stages",
+        "-js",
+        type=int,
+        default=None,
+        help="Number of sequential judge stages to run",
+    )
+    parser.add_argument(
+        "--judge_confidence_threshold",
+        "-jct",
+        type=float,
+        default=None,
+        help="Confidence threshold (0-1 or 0-100) above which the pipeline will stop after judge stage 1",
+    )
+
+    parser.add_argument(
+        "--max_attempts",
+        "--max_retries",
+        "-k",
+        dest="k",
+        type=int,
+        default=None,
+        help="Max attempts for retry/refinement loops (alias: --max_retries).",
+    )
+    parser.add_argument(
+        "--max_tries",
+        type=int,
+        default=None,
+        help="Max tries for feedback/retry loops (alias of --max_attempts).",
+    )
+    parser.add_argument(
+        "--judge_confidence_increment",
+        "-jci",
+        type=float,
+        default=None,
+        help="Per-attempt confidence increment (0-1 or 0-100).",
+    )
+    parser.add_argument(
+        "--judge_confidence_thresholds",
+        "-jcts",
+        type=str,
+        default=None,
+        help="Comma-separated per-attempt confidence thresholds, e.g. '65,70,75' (0-1 or 0-100).",
+    )
+
+    parser.add_argument(
         "--run_args",
         "-ra",
         type=json.loads,
-        default="{}",
+        default={},
         help='Custom args for the run as a JSON string, e.g. \'{"key1": "value1", "key2": "value1"}\'',
     )
     parser.add_argument(
@@ -156,6 +204,27 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Merge dedicated CLI args into run_args for backward compatibility.
+    if args.run_args is None or not isinstance(args.run_args, dict):
+        args.run_args = {}
+
+    if getattr(args, "k", None) is not None and "max_attempts" not in args.run_args:
+        args.run_args["max_attempts"] = args.k
+
+    if getattr(args, "max_tries", None) is not None:
+        if "max_tries" not in args.run_args:
+            args.run_args["max_tries"] = args.max_tries
+        if getattr(args, "k", None) is None:
+            args.k = args.max_tries
+        if "max_attempts" not in args.run_args:
+            args.run_args["max_attempts"] = args.max_tries
+
+    if getattr(args, "judge_confidence_increment", None) is not None and "judge_confidence_increment" not in args.run_args:
+        args.run_args["judge_confidence_increment"] = args.judge_confidence_increment
+
+    if getattr(args, "judge_confidence_thresholds", None) is not None and "judge_confidence_thresholds" not in args.run_args:
+        args.run_args["judge_confidence_thresholds"] = args.judge_confidence_thresholds
+
     start = time.time()
     task_name = args.task
 
@@ -190,11 +259,42 @@ if __name__ == "__main__":
         utils.current_task = task_name
 
     specialized_executor_cls = None
-    executor_path = f"tasks.{task_name}.task_executor.TaskExecutor"
+    module_task_name = (
+        utils.get_dot_walk_path(args.task) if "/" in args.task else args.task
+    )
+
+    # Optional override: allow callers to specify an explicit executor path.
+    executor_override = None
     try:
-        specialized_executor_cls = utils.get_func_from_str(executor_path)
-        logger.info(f"Found specialized TaskExecutor at {executor_path}")
-    except (ModuleNotFoundError, AttributeError) as e:
+        if isinstance(args.run_args, dict):
+            executor_override = args.run_args.get("executor_path") or args.run_args.get("task_executor")
+    except Exception:
+        executor_override = None
+
+    if isinstance(executor_override, str) and executor_override.strip():
+        try:
+            specialized_executor_cls = utils.get_func_from_str(executor_override.strip())
+            logger.info(f"Using TaskExecutor override at {executor_override.strip()}")
+        except Exception as e:
+            logger.error(f"Failed to load TaskExecutor override {executor_override!r}: {e}")
+            sys.exit(1)
+
+    executor_paths = [
+        f"{module_task_name}.task_executor_llm_as_judge_feedback_loop_v2.TaskExecutor",
+        f"{module_task_name}.task_executor_feedback.TaskExecutor",
+        # f"{module_task_name}.task_executor_llm_as_judge.TaskExecutor",
+        # f"{module_task_name}.task_executor.TaskExecutor",
+    ]
+    for executor_path in executor_paths:
+        if specialized_executor_cls is not None:
+            break
+        try:
+            specialized_executor_cls = utils.get_func_from_str(executor_path)
+            logger.info(f"Found specialized TaskExecutor at {executor_path}")
+            break
+        except (ModuleNotFoundError, AttributeError):
+            continue
+    if specialized_executor_cls is None:
         logger.info(
             f"No specialized TaskExecutor found for task: {task_name}. Using DefaultTaskExecutor."
         )

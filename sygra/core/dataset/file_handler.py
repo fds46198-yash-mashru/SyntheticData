@@ -124,6 +124,27 @@ class FileHandler(DataHandler):
             if output_path.suffix == ".parquet":
                 df = pd.DataFrame(data)
                 df.to_parquet(output_path)
+            elif output_path.suffix == ".csv":
+                # Detect and flatten common nested list-of-dicts structure
+                # Example: data = [{"synthetic_rows": [{...}, {...}]}]
+                enc = self.output_config.encoding if self.output_config else "utf-8"
+                records_to_write: Any = data
+                try:
+                    if (
+                        isinstance(data, list)
+                        and len(data) == 1
+                        and isinstance(data[0], dict)
+                    ):
+                        # Prefer the first list-of-dicts field inside the dict (e.g., synthetic_rows)
+                        for v in data[0].values():
+                            if isinstance(v, list) and (len(v) == 0 or isinstance(v[0], dict)):
+                                records_to_write = v
+                                break
+                    df = pd.DataFrame(records_to_write)
+                except Exception as e:
+                    logger.error(f"Failed to normalize data for CSV: {e}. Falling back to raw records.")
+                    df = pd.DataFrame(data)
+                df.to_csv(output_path, index=False, encoding=enc)
             elif output_path.suffix == ".jsonl":
                 enc = self.output_config.encoding if self.output_config else "utf-8"
                 with open(output_path, "a", encoding=enc) as f:
